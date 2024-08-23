@@ -29,6 +29,12 @@ type File struct {
     Path   []string `bencode:"path"`
 }
 
+// TorrentFile represents a file in the torrent
+type TorrentFile struct {
+    Path   string
+    Length int64
+}
+
 // ParseMetaInfo parses a .torrent file
 func ParseMetaInfo(data []byte) (*MetaInfo, error) {
     var torrent map[string]interface{}

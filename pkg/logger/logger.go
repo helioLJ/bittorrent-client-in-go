@@ -43,3 +43,10 @@ func Debug(format string, v ...interface{}) {
 	}
 	logger.Output(2, fmt.Sprintf("DEBUG: "+format, v...))
 }
+
+func Warn(format string, v ...interface{}) {
+	if logger == nil {
+		InitLogger(os.Stdout)
+	}
+	logger.Output(2, fmt.Sprintf("WARN: "+format, v...))
+}
