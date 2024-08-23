@@ -1,52 +1,50 @@
 package logger
 
 import (
-	"fmt"
-	"io"
 	"log"
 	"os"
-	"sync"
+)
+
+const (
+	LevelDebug = iota
+	LevelInfo
+	LevelWarn
+	LevelError
 )
 
 var (
-	logger *log.Logger
-	once   sync.Once
+	debugLogger = log.New(os.Stdout, "DEBUG: ", log.Ldate|log.Ltime|log.Lshortfile)
+	infoLogger  = log.New(os.Stdout, "INFO: ", log.Ldate|log.Ltime|log.Lshortfile)
+	warnLogger  = log.New(os.Stdout, "WARN: ", log.Ldate|log.Ltime|log.Lshortfile)
+	errorLogger = log.New(os.Stderr, "ERROR: ", log.Ldate|log.Ltime|log.Lshortfile)
+
+	currentLevel = LevelDebug
 )
 
-// InitLogger initializes the logger
-func InitLogger(out io.Writer) {
-	once.Do(func() {
-		logger = log.New(out, "bittorrent-client: ", log.LstdFlags|log.Lshortfile)
-	})
+func SetLevel(level int) {
+	currentLevel = level
 }
 
-// Info logs an informational message
-func Info(format string, v ...interface{}) {
-	if logger == nil {
-		InitLogger(os.Stdout)
-	}
-	logger.Output(2, fmt.Sprintf("INFO: "+format, v...))
-}
-
-// Error logs an error message
-func Error(format string, v ...interface{}) {
-	if logger == nil {
-		InitLogger(os.Stderr)
-	}
-	logger.Output(2, fmt.Sprintf("ERROR: "+format, v...))
-}
-
-// Debug logs a debug message
 func Debug(format string, v ...interface{}) {
-	if logger == nil {
-		InitLogger(os.Stdout)
+	if currentLevel <= LevelDebug {
+		debugLogger.Printf(format, v...)
 	}
-	logger.Output(2, fmt.Sprintf("DEBUG: "+format, v...))
+}
+
+func Info(format string, v ...interface{}) {
+	if currentLevel <= LevelInfo {
+		infoLogger.Printf(format, v...)
+	}
 }
 
 func Warn(format string, v ...interface{}) {
-	if logger == nil {
-		InitLogger(os.Stdout)
+	if currentLevel <= LevelWarn {
+		warnLogger.Printf(format, v...)
 	}
-	logger.Output(2, fmt.Sprintf("WARN: "+format, v...))
+}
+
+func Error(format string, v ...interface{}) {
+	if currentLevel <= LevelError {
+		errorLogger.Printf(format, v...)
+	}
 }

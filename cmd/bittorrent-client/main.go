@@ -6,8 +6,8 @@ import (
 	"bittorrent-client/internal/tracker"
 	"bittorrent-client/pkg/logger"
 	"context"
+	"flag"
 	"fmt"
-	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -16,19 +16,26 @@ import (
 )
 
 func main() {
-	// Initialize logger
-	logger.InitLogger(os.Stdout)
+	debug := flag.Bool("debug", false, "Enable debug logging")
+	flag.Parse()
+
+	if *debug {
+		logger.SetLevel(logger.LevelDebug)
+	} else {
+		logger.SetLevel(logger.LevelInfo)
+	}
 
 	// Check command-line arguments
-	if len(os.Args) < 2 {
+	args := flag.Args()
+	if len(args) < 1 {
 		logger.Error("Usage: %s <torrent_file_or_magnet_link> [output_file]", os.Args[0])
 		os.Exit(1)
 	}
 
-	input := os.Args[1]
+	input := args[0]
 	outputFile := "output"
-	if len(os.Args) > 2 {
-		outputFile = os.Args[2]
+	if len(args) > 1 {
+		outputFile = args[1]
 	}
 
 	var metaInfo *torrent.MetaInfo
@@ -74,9 +81,11 @@ func main() {
 
 	// Add the main tracker from the torrent file
 	if metaInfo.Announce != "" {
-		trackerURL, err := url.Parse(metaInfo.Announce)
+		mainTracker, err := tracker.NewTracker(metaInfo.Announce, peerID, infoHash)
 		if err == nil {
-			multiTracker.AddTracker(tracker.NewTracker(trackerURL, peerID, infoHash))
+			multiTracker.AddTracker(mainTracker)
+		} else {
+			logger.Info("Invalid announce URL: %s", metaInfo.Announce)
 		}
 	}
 
@@ -87,9 +96,9 @@ func main() {
 		"udp://tracker.internetwarriors.net:1337/announce",
 	}
 	for _, fallbackTracker := range fallbackTrackers {
-		fallbackURL, err := url.Parse(fallbackTracker)
+		fallbackURL, err := tracker.NewTracker(fallbackTracker, peerID, infoHash)
 		if err == nil {
-			multiTracker.AddTracker(tracker.NewTracker(fallbackURL, peerID, infoHash))
+			multiTracker.AddTracker(fallbackURL)
 		}
 	}
 

@@ -2,126 +2,75 @@ package torrent
 
 import (
 	"bittorrent-client/internal/bencode"
+	"bittorrent-client/pkg/logger"
 	"crypto/sha1"
 	"errors"
 	"fmt"
-	"strconv"
+	"log"
 )
+
+// InfoDict represents the 'info' dictionary in a torrent file
+type InfoDict struct {
+	PieceLength int64  `bencode:"piece length"`
+	Pieces      string `bencode:"pieces"`
+	Name        string `bencode:"name"`
+	Length      int64  `bencode:"length,omitempty"`
+	Files       []struct {
+		Length int64    `bencode:"length"`
+		Path   []string `bencode:"path"`
+	} `bencode:"files,omitempty"`
+}
 
 // MetaInfo represents the metadata of a torrent file
 type MetaInfo struct {
-	Announce string
-	Info     InfoDict
+	Announce string   `bencode:"announce"`
+	Info     InfoDict `bencode:"info"`
 }
 
-// InfoDict contains information about the files in the torrent
-type InfoDict struct {
-    PieceLength int64    `bencode:"piece length"`
-    Pieces      string   `bencode:"pieces"`
-    Name        string   `bencode:"name"`
-    Length      int64    `bencode:"length,omitempty"`
-    Files       []File   `bencode:"files,omitempty"`
-}
-
-// File represents a file in a multi-file torrent
-type File struct {
-    Length int64    `bencode:"length"`
-    Path   []string `bencode:"path"`
-}
-
-// TorrentFile represents a file in the torrent
-type TorrentFile struct {
-    Path   string
-    Length int64
-}
-
-// ParseMetaInfo parses a .torrent file
+// ParseMetaInfo parses the metadata from torrent file content
 func ParseMetaInfo(data []byte) (*MetaInfo, error) {
-    var torrent map[string]interface{}
-    decoded, err := bencode.Decode(data)
+    var metaInfo MetaInfo
+    err := bencode.Unmarshal(data, &metaInfo)
     if err != nil {
-        return nil, err
+        return nil, fmt.Errorf("failed to unmarshal torrent file: %w", err)
     }
 
-    var ok bool
-    torrent, ok = decoded.(map[string]interface{})
-    if !ok {
-        return nil, errors.New("invalid torrent structure")
+    // Debug logging to inspect the parsed data
+    // log.Printf("Raw parsed MetaInfo: %+v", metaInfo)
+
+    // Check the announce URL
+    if metaInfo.Announce == "" {
+        logger.Warn("Missing announce URL in torrent file")
+        // Instead of returning an error, we'll log a warning and continue
     }
 
-    metainfo := &MetaInfo{}
-
-    announce, ok := torrent["announce"].(string)
-    if !ok {
-        return nil, errors.New("invalid announce URL")
-    }
-    metainfo.Announce = announce
-
-    infoDict, ok := torrent["info"].(map[string]interface{})
-    if !ok {
-        return nil, errors.New("invalid info dictionary")
+    // Additional checks for other required fields
+    if metaInfo.Info.PieceLength == 0 {
+        return nil, errors.New("missing or invalid piece length")
     }
 
-    pieceLength, ok := infoDict["piece length"].(int64)
-    if !ok {
-        // Try to parse it as a string
-        pieceLength, err = strconv.ParseInt(fmt.Sprint(infoDict["piece length"]), 10, 64)
-        if err != nil {
-            return nil, errors.New("invalid piece length")
-        }
-    }
-    metainfo.Info.PieceLength = pieceLength
-
-    pieces, ok := infoDict["pieces"].(string)
-    if !ok {
-        return nil, errors.New("invalid pieces")
-    }
-    metainfo.Info.Pieces = pieces
-
-    name, ok := infoDict["name"].(string)
-    if !ok {
-        return nil, errors.New("invalid name")
-    }
-    metainfo.Info.Name = name
-
-    if length, ok := infoDict["length"].(int64); ok {
-        metainfo.Info.Length = length
-    } else if files, ok := infoDict["files"].([]interface{}); ok {
-        for _, file := range files {
-            fileMap, ok := file.(map[string]interface{})
-            if !ok {
-                return nil, errors.New("invalid file entry")
-            }
-            fileLength, ok := fileMap["length"].(int64)
-            if !ok {
-                return nil, errors.New("invalid file length")
-            }
-            filePath, ok := fileMap["path"].([]interface{})
-            if !ok {
-                return nil, errors.New("invalid file path")
-            }
-            pathStrings := make([]string, len(filePath))
-            for i, p := range filePath {
-                pathStrings[i], ok = p.(string)
-                if !ok {
-                    return nil, errors.New("invalid file path element")
-                }
-            }
-            metainfo.Info.Files = append(metainfo.Info.Files, File{Length: fileLength, Path: pathStrings})
-        }
-    } else {
-        return nil, errors.New("invalid torrent structure: missing length or files")
+    if len(metaInfo.Info.Pieces) == 0 {
+        return nil, errors.New("missing pieces information")
     }
 
-    return metainfo, nil
+    if metaInfo.Info.Name == "" {
+        return nil, errors.New("missing torrent name")
+    }
+
+    // Log more details about the parsed info
+    log.Printf("Parsed Info: Name=%s, PieceLength=%d, PiecesLength=%d, Files=%v",
+        metaInfo.Info.Name, metaInfo.Info.PieceLength, len(metaInfo.Info.Pieces), metaInfo.Info.Files)
+
+    // If everything is valid, return the parsed MetaInfo
+    return &metaInfo, nil
 }
 
 // InfoHash returns the SHA1 hash of the info dictionary
 func (m *MetaInfo) InfoHash() ([20]byte, error) {
 	infoDict := map[string]interface{}{
-		"piece length": m.Info.PieceLength,
-		"pieces":       m.Info.Pieces,
-		"name":         m.Info.Name,
+			"piece length": m.Info.PieceLength,
+			"pieces":       m.Info.Pieces,
+			"name":         m.Info.Name,
 	}
 
 	if m.Info.Length > 0 {

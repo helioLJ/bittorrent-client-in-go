@@ -1,6 +1,7 @@
 package peer
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -37,6 +38,7 @@ type Peer struct {
 	stopKeepalive  chan struct{}
 	mu             sync.Mutex
 	Bitfield       Bitfield
+	keepaliveOnce  sync.Once
 }
 
 // Bitfield represents the pieces that a peer has
@@ -81,38 +83,15 @@ func NewPeer(addr net.Addr, peerID [20]byte, infoHash [20]byte) *Peer {
 
 // Connect establishes a connection to the peer
 func (p *Peer) Connect(ctx context.Context) error {
-	dialer := net.Dialer{Timeout: 20 * time.Second}
-	var err error
-	p.Conn, err = dialer.DialContext(ctx, "tcp", p.Addr.String())
+	dialer := &net.Dialer{
+		Timeout: 30 * time.Second, // Increase timeout
+	}
+	conn, err := dialer.DialContext(ctx, "tcp", p.Addr.String())
 	if err != nil {
 		return err
 	}
-
-	// Small delay before handshake
-	time.Sleep(100 * time.Millisecond)
-
-	// Retry handshake up to 3 times
-	for i := 0; i < 3; i++ {
-		err = p.sendHandshake()
-		if err == nil {
-			break
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	if err != nil {
-		p.Conn.Close()
-		return err
-	}
-
-	err = p.readHandshake()
-	if err != nil {
-		p.Conn.Close()
-		return err
-	}
-
-	go p.keepAlive(ctx)
-
-	return nil
+	p.Conn = conn
+	return p.sendHandshake()
 }
 
 // Disconnect closes the connection to the peer
@@ -155,8 +134,9 @@ func (p *Peer) readHandshake() error {
 		return errors.New("invalid protocol")
 	}
 
-	copy(p.InfoHash[:], handshake[28:48])
-	copy(p.PeerID[:], handshake[48:])
+	if !bytes.Equal(handshake[28:48], p.InfoHash[:]) {
+		return errors.New("info hash mismatch")
+	}
 
 	return nil
 }
@@ -172,6 +152,9 @@ func (p *Peer) ReadMessage() (int, []byte, error) {
 	lengthBuf := make([]byte, 4)
 	_, err = io.ReadFull(p.Conn, lengthBuf)
 	if err != nil {
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			return 0, nil, fmt.Errorf("read timeout")
+		}
 		return 0, nil, err
 	}
 
@@ -234,7 +217,9 @@ func (p *Peer) keepAlive(ctx context.Context) {
 }
 
 func (p *Peer) StopKeepalive() {
-	close(p.stopKeepalive)
+	p.keepaliveOnce.Do(func() {
+		close(p.stopKeepalive)
+	})
 }
 
 func (p *Peer) UpdateLastActiveTime() {

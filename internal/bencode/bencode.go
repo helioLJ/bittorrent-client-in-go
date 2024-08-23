@@ -72,6 +72,89 @@ func encodeValue(w io.Writer, v reflect.Value) error {
 	}
 }
 
+// Unmarshal decodes bencoded data into a Go structure
+func Unmarshal(data []byte, v interface{}) error {
+	r := bytes.NewReader(data)
+	value, err := decodeValue(r)
+	if err != nil {
+		return err
+	}
+	return populateValue(reflect.ValueOf(v).Elem(), value)
+}
+
+func populateValue(v reflect.Value, data interface{}) error {
+	switch v.Kind() {
+	case reflect.Interface:
+		v.Set(reflect.ValueOf(data))
+	case reflect.Ptr:
+		if v.IsNil() {
+			v.Set(reflect.New(v.Type().Elem()))
+		}
+		return populateValue(v.Elem(), data)
+	case reflect.Struct:
+		m, ok := data.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("expected map for struct, got %T", data)
+		}
+		for i := 0; i < v.NumField(); i++ {
+			field := v.Type().Field(i)
+			fieldValue := v.Field(i)
+			fieldName := field.Tag.Get("bencode")
+			if fieldName == "" {
+				fieldName = field.Name
+			}
+			if value, ok := m[fieldName]; ok {
+				if err := populateValue(fieldValue, value); err != nil {
+					return err
+				}
+			}
+		}
+	case reflect.Slice:
+		s, ok := data.([]interface{})
+		if !ok {
+			return fmt.Errorf("expected slice, got %T", data)
+		}
+		slice := reflect.MakeSlice(v.Type(), len(s), len(s))
+		for i := 0; i < len(s); i++ {
+			if err := populateValue(slice.Index(i), s[i]); err != nil {
+				return err
+			}
+		}
+		v.Set(slice)
+	case reflect.Map:
+		m, ok := data.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("expected map, got %T", data)
+		}
+		mapType := reflect.MapOf(v.Type().Key(), v.Type().Elem())
+		mapValue := reflect.MakeMap(mapType)
+		for key, value := range m {
+			mapKey := reflect.ValueOf(key)
+			mapElem := reflect.New(v.Type().Elem()).Elem()
+			if err := populateValue(mapElem, value); err != nil {
+				return err
+			}
+			mapValue.SetMapIndex(mapKey, mapElem)
+		}
+		v.Set(mapValue)
+	case reflect.String:
+		str, ok := data.(string)
+		if !ok {
+			return fmt.Errorf("expected string, got %T", data)
+		}
+		v.SetString(str)
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		num, ok := data.(int64)
+		if !ok {
+			return fmt.Errorf("expected int, got %T", data)
+		}
+		v.SetInt(num)
+	default:
+		return fmt.Errorf("unsupported kind: %s", v.Kind())
+	}
+	return nil
+}
+
 // Decode decodes bencoded data
 func Decode(data []byte) (interface{}, error) {
 	r := bytes.NewReader(data)

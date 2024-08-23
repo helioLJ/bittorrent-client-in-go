@@ -21,6 +21,7 @@ type FileManager struct {
     pieceSize    int64
     pieceOffsets []int64
     totalLength  int64
+    numPieces    int // Added this field
 }
 
 // NewFileManager creates a new FileManager
@@ -34,6 +35,12 @@ func NewFileManager(baseDir string) *FileManager {
 // SetPieceSize sets the piece size for the FileManager
 func (fm *FileManager) SetPieceSize(size int64) {
     fm.pieceSize = size
+    fm.numPieces = int((fm.totalLength + fm.pieceSize - 1) / fm.pieceSize)
+}
+
+func (fm *FileManager) SetTotalLength(length int64) {
+    fm.totalLength = length
+    fm.numPieces = int((fm.totalLength + fm.pieceSize - 1) / fm.pieceSize)
 }
 
 // Initialize function should be updated to use torrent.TorrentFile
@@ -62,19 +69,24 @@ func (fm *FileManager) Initialize(files []common.TorrentFile) error {
     }
 
     fm.totalLength = offset
+    fm.pieceOffsets = append(fm.pieceOffsets, offset) // Add final offset
+    
+    // Calculate the number of pieces
+    if fm.pieceSize > 0 {
+        fm.numPieces = int((fm.totalLength + fm.pieceSize - 1) / fm.pieceSize)
+    } else {
+        fm.numPieces = 1 // Default to 1 if pieceSize is not set
+    }
+
     return nil
 }
 
 // WritePiece writes a piece of the file to disk
-func (fm *FileManager) WritePiece(index int, data []byte) error {
+func (fm *FileManager) WritePiece(index int, offset int64, data []byte) error {
     fm.mutex.Lock()
     defer fm.mutex.Unlock()
 
-    if index < 0 || index >= len(fm.pieceOffsets) {
-        return fmt.Errorf("invalid piece index: %d", index)
-    }
-
-    pieceOffset := fm.pieceOffsets[index]
+    pieceOffset := int64(index) * fm.pieceSize + offset
     remainingData := data
 
     for i, fileInfo := range fm.files {

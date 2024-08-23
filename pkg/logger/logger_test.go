@@ -8,7 +8,7 @@ import (
 
 func TestLogger(t *testing.T) {
 	buf := new(bytes.Buffer)
-	InitLogger(buf)
+	// InitLogger(buf)
 
 	tests := []struct {
 		logFunc func(string, ...interface{})
