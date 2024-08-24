@@ -1,0 +1,2 @@
+- When trying to download Ubuntu, all connections are being refused or timed out.
+- 

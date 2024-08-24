@@ -84,14 +84,38 @@ func NewPeer(addr net.Addr, peerID [20]byte, infoHash [20]byte) *Peer {
 // Connect establishes a connection to the peer
 func (p *Peer) Connect(ctx context.Context) error {
 	dialer := &net.Dialer{
-		Timeout: 30 * time.Second, // Increase timeout
+		Timeout: 30 * time.Second,
 	}
 	conn, err := dialer.DialContext(ctx, "tcp", p.Addr.String())
 	if err != nil {
 		return err
 	}
 	p.Conn = conn
-	return p.sendHandshake()
+
+	// Set a deadline for the handshake
+	if err := p.Conn.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		return err
+	}
+
+	if err := p.sendHandshake(); err != nil {
+		p.Conn.Close()
+		return err
+	}
+
+	if err := p.readHandshake(); err != nil {
+		p.Conn.Close()
+		return err
+	}
+
+	// Clear the deadline after handshake
+	if err := p.Conn.SetDeadline(time.Time{}); err != nil {
+		return err
+	}
+
+	// Start keepalive
+	go p.keepAlive(ctx)
+
+	return nil
 }
 
 // Disconnect closes the connection to the peer
@@ -248,4 +272,53 @@ func NewPieceMessage(index, begin uint32, data []byte) []byte {
 	binary.BigEndian.PutUint32(msg[4:8], begin)
 	copy(msg[8:], data)
 	return msg
+}
+
+// Handshake implements the BitTorrent protocol handshake
+func (p *Peer) Handshake() error {
+	handshake := make([]byte, 68)
+	handshake[0] = 19
+	copy(handshake[1:20], []byte("BitTorrent protocol"))
+	// ... set reserved bytes ...
+	copy(handshake[28:48], p.InfoHash[:])
+	copy(handshake[48:68], p.PeerID[:])
+
+	_, err := p.Conn.Write(handshake)
+	if err != nil {
+		return err
+	}
+
+	_, err = io.ReadFull(p.Conn, handshake)
+	if err != nil {
+		return err
+	}
+
+	// Verify the handshake response
+	// ...
+
+	return nil
+}
+
+// ReceiveMessage implements receiving BitTorrent messages
+func (p *Peer) ReceiveMessage() (byte, []byte, error) {
+	lengthBuf := make([]byte, 4)
+	_, err := io.ReadFull(p.Conn, lengthBuf)
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to read message length: %w", err)
+	}
+
+	length := binary.BigEndian.Uint32(lengthBuf)
+	if length == 0 {
+		// Keep-alive message
+		return 0, nil, nil // Using 0 instead of MsgKeepAlive
+	}
+
+	messageBuf := make([]byte, length)
+	_, err = io.ReadFull(p.Conn, messageBuf)
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to read message body: %w", err)
+	}
+
+	p.UpdateLastActiveTime()
+	return messageBuf[0], messageBuf[1:], nil
 }

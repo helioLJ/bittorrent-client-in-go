@@ -54,6 +54,7 @@ type Torrent struct {
 	progressDone     chan struct{}
 	downloadMu       sync.Mutex
 	PieceSize        int64
+	activePeers      map[string]*peer.Peer
 }
 
 // Piece represents a piece of the torrent
@@ -162,6 +163,7 @@ func NewTorrent(metaInfo *MetaInfo, multiTracker *tracker.MultiTracker) (*Torren
 		progressTicker: time.NewTicker(5 * time.Second),
 		progressDone:   make(chan struct{}),
 		PieceSize:      metaInfo.Info.PieceLength,
+		activePeers:    make(map[string]*peer.Peer),
 	}
 
 	go t.progressReporter()
@@ -182,15 +184,7 @@ func (t *Torrent) Download(ctx context.Context) error {
 	}
 
 	// Announce to the tracker and get peers
-	peers, err := t.Tracker.Announce(t.Downloaded, t.Uploaded, t.Left)
-	if err != nil {
-		logger.Warn("Tracker announce failed: %v. Falling back to DHT.", err)
-	} else {
-		logger.Info("Received %d peers from trackers", len(peers))
-		for _, addr := range peers {
-			go t.connectToPeers(ctx, addr)
-		}
-	}
+	go t.announceWithRetry(ctx)
 
 	// Get the info hash for DHT
 	infoHash, err := t.MetaInfo.InfoHash()
@@ -336,34 +330,44 @@ func (t *Torrent) verifyDownload() error {
 }
 
 func (t *Torrent) managePeerConnections(ctx context.Context) {
-	ticker := time.NewTicker(1 * time.Minute)
-	defer ticker.Stop()
+    ticker := time.NewTicker(30 * time.Second)
+    defer ticker.Stop()
 
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			t.activePeersMutex.Lock()
-			activePeers := t.ActivePeers
-			t.activePeersMutex.Unlock()
+    for {
+        select {
+        case <-ctx.Done():
+            return
+        case <-ticker.C:
+            t.activePeersMutex.Lock()
+            activePeers := t.ActivePeers
+            t.activePeersMutex.Unlock()
 
-			if activePeers < 10 {
-				logger.Info("Active peers below threshold, requesting more peers")
-				go t.requestMorePeers(ctx)
-			}
+            if activePeers < 10 {
+                logger.Info("Active peers below threshold, requesting more peers")
+                go t.requestMorePeers(ctx)
+            }
 
-			// Clean up old failed peers
-			t.failedPeersMutex.Lock()
-			for addr, lastFailure := range t.failedPeers {
-				if time.Since(lastFailure) > 30*time.Minute {
-					delete(t.failedPeers, addr)
-					logger.Info("Removed %s from failed peers list", addr)
-				}
-			}
-			t.failedPeersMutex.Unlock()
+            // Clean up disconnected peers
+            t.cleanupDisconnectedPeers()
 
-			logger.Info("Peer connection status: Active peers: %d, Failed peers: %d", activePeers, len(t.failedPeers))
+            // Clean up failed peers
+            t.cleanupFailedPeers()
+
+            logger.Info("Peer connection status: Active peers: %d, Failed peers: %d", activePeers, len(t.failedPeers))
+        }
+    }
+}
+
+func (t *Torrent) cleanupDisconnectedPeers() {
+	t.activePeersMutex.Lock()
+	defer t.activePeersMutex.Unlock()
+
+	for addr, peer := range t.activePeers {
+		if time.Since(peer.GetLastActiveTime()) > 2*time.Minute {
+			logger.Info("Peer %s inactive, disconnecting", addr)
+			peer.Disconnect()
+			delete(t.activePeers, addr)
+			t.ActivePeers--
 		}
 	}
 }
@@ -617,9 +621,11 @@ func (t *Torrent) connectToPeers(ctx context.Context, addr net.Addr) {
     maxRetries := 5
     retryDelay := time.Second
 
+    logger.Debug("Attempting to connect to peer %s (max retries: %d)", addr, maxRetries)
+
     for i := 0; i < maxRetries; i++ {
         if err := t.peerLimiter.Wait(ctx); err != nil {
-            logger.Error("Rate limit error: %v", err)
+            logger.Error("Rate limit error when connecting to %s: %v", addr, err)
             return
         }
 
@@ -633,23 +639,34 @@ func (t *Torrent) connectToPeers(ctx context.Context, addr net.Addr) {
 
         infoHash, err := t.MetaInfo.InfoHash()
         if err != nil {
-            logger.Error("Failed to get info hash: %v", err)
+            logger.Error("Failed to get info hash for peer %s: %v", addr, err)
             return
         }
 
         p := peer.NewPeer(addr, t.PeerID, infoHash)
 
+        logger.Debug("Attempting connection to peer %s (attempt %d/%d)", addr, i+1, maxRetries)
         err = p.Connect(ctx)
         if err != nil {
             if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-                logger.Debug("Connection to peer %s timed out", addr)
+                logger.Warn("Connection to peer %s timed out (attempt %d/%d)", addr, i+1, maxRetries)
             } else {
-                logger.Debug("Failed to connect to peer %s: %v", addr, err)
+                logger.Warn("Failed to connect to peer %s: %v (attempt %d/%d)", addr, err, i+1, maxRetries)
             }
-            time.Sleep(retryDelay)
-            retryDelay *= 2
+            if i < maxRetries-1 {
+                logger.Debug("Retrying connection to peer %s in %v", addr, retryDelay)
+                select {
+                case <-time.After(retryDelay):
+                    retryDelay *= 2
+                case <-ctx.Done():
+                    logger.Warn("Context cancelled while waiting to retry connection to peer %s", addr)
+                    return
+                }
+            }
             continue
         }
+
+        logger.Info("Successfully connected to peer %s", addr)
 
         t.activePeersMutex.Lock()
         t.ActivePeers++
@@ -659,9 +676,11 @@ func (t *Torrent) connectToPeers(ctx context.Context, addr net.Addr) {
         return
     }
 
+    logger.Warn("Failed to connect to peer %s after %d attempts", addr, maxRetries)
     t.failedPeersMutex.Lock()
     t.failedPeers[addr.String()] = time.Now()
     t.failedPeersMutex.Unlock()
+    logger.Debug("Marked peer %s as failed", addr)
 }
 
 // Update the SetFileManager function in the Torrent struct
@@ -760,45 +779,93 @@ func (t *Torrent) discoverPeers(ctx context.Context, hash metainfo.Hash) {
     }
 
     peerCount := 0
+    uniquePeers := make(map[string]struct{})
+
     for {
         select {
         case <-ctx.Done():
-            logger.Info("DHT peer discovery stopped, found %d peers", peerCount)
+            logger.Info("DHT peer discovery stopped, found %d unique peers", len(uniquePeers))
             return
         case r, ok := <-traversal.Peers:
             if !ok {
-                logger.Info("DHT peer discovery finished, found %d peers", peerCount)
+                logger.Info("DHT peer discovery finished, found %d unique peers", len(uniquePeers))
                 return
             }
-            peerCount++
-            netAddr := &net.TCPAddr{
-                IP:   r.Addr.IP,
-                Port: r.Addr.Port,
+            addr := fmt.Sprintf("%s:%d", r.Addr.IP.String(), r.Addr.Port)
+            if _, exists := uniquePeers[addr]; !exists {
+                uniquePeers[addr] = struct{}{}
+                peerCount++
+                netAddr := &net.TCPAddr{
+                    IP:   r.Addr.IP,
+                    Port: r.Addr.Port,
+                }
+                go t.connectAndHandlePeer(ctx, peer.NewPeer(netAddr, t.PeerID, infoHash))
             }
-            go t.connectAndHandlePeer(ctx, peer.NewPeer(netAddr, t.PeerID, infoHash))
         }
     }
 }
 
 func (t *Torrent) connectAndHandlePeer(ctx context.Context, p *peer.Peer) {
-	err := p.Connect(ctx)
-	if err != nil {
-		logger.Debug("Failed to connect to peer %s: %v", p.Addr, err)
-		return
-	}
+    if t.isFailed(p.Addr.String()) {
+        return
+    }
 
-	t.activePeersMutex.Lock()
-	t.ActivePeers++
-	t.activePeersMutex.Unlock()
+    logger.Debug("Attempting to connect to peer %s", p.Addr)
 
-	defer func() {
-		p.Disconnect()
-		t.activePeersMutex.Lock()
-		t.ActivePeers--
-		t.activePeersMutex.Unlock()
-	}()
+    ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+    defer cancel()
 
-	t.handlePeer(ctx, p)
+    err := p.Connect(ctx)
+    if err != nil {
+        logger.Debug("Failed to connect to peer %s: %v", p.Addr, err)
+        t.markFailed(p.Addr.String())
+        return
+    }
+
+    t.activePeersMutex.Lock()
+    t.ActivePeers++
+    t.activePeers[p.Addr.String()] = p
+    t.activePeersMutex.Unlock()
+
+    logger.Info("Successfully connected to peer %s", p.Addr)
+
+    defer func() {
+        t.activePeersMutex.Lock()
+        delete(t.activePeers, p.Addr.String())
+        t.ActivePeers--
+        t.activePeersMutex.Unlock()
+        p.Disconnect()
+    }()
+
+    t.handlePeer(ctx, p)
+}
+
+func (t *Torrent) announceWithRetry(ctx context.Context) {
+    maxRetries := 5
+    baseDelay := time.Second
+
+    for i := 0; i < maxRetries; i++ {
+        peers, err := t.Tracker.Announce(t.Downloaded, t.Uploaded, t.Left)
+        if err == nil {
+            logger.Info("Received %d peers from trackers", len(peers))
+            for _, addr := range peers {
+                go t.connectToPeers(ctx, addr)
+            }
+            return
+        }
+
+        logger.Warn("Tracker announce failed (attempt %d/%d): %v", i+1, maxRetries, err)
+        
+        // Exponential backoff
+        delay := time.Duration(1<<uint(i)) * baseDelay
+        select {
+        case <-ctx.Done():
+            return
+        case <-time.After(delay):
+        }
+    }
+
+    logger.Error("All tracker announce attempts failed")
 }
 
 func (t *Torrent) progressReporter() {
@@ -833,3 +900,39 @@ func (t *Torrent) reportProgress() {
         progress, downloadedPieces, totalPieces, downloaded, t.MetaInfo.TotalLength())
 }
 
+
+// Add these methods to your Torrent struct
+
+// isFailed checks if a peer has been marked as failed
+func (t *Torrent) isFailed(addr string) bool {
+    t.failedPeersMutex.Lock()
+    defer t.failedPeersMutex.Unlock()
+    
+    failTime, exists := t.failedPeers[addr]
+    if !exists {
+        return false
+    }
+    
+    // Consider a peer failed for 5 minutes
+    return time.Since(failTime) < 5*time.Minute
+}
+
+// markFailed marks a peer as failed
+func (t *Torrent) markFailed(addr string) {
+    t.failedPeersMutex.Lock()
+    defer t.failedPeersMutex.Unlock()
+    
+    t.failedPeers[addr] = time.Now()
+}
+
+// You might also want to add a method to clean up old failed peers
+func (t *Torrent) cleanupFailedPeers() {
+    t.failedPeersMutex.Lock()
+    defer t.failedPeersMutex.Unlock()
+    
+    for addr, failTime := range t.failedPeers {
+        if time.Since(failTime) > 5*time.Minute {
+            delete(t.failedPeers, addr)
+        }
+    }
+}

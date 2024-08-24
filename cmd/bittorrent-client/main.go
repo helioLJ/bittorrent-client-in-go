@@ -15,6 +15,26 @@ import (
 	"time"
 )
 
+func getUbuntuTrackers() []string {
+    return []string{
+        "udp://tracker.opentrackr.org:1337/announce",
+        "udp://tracker.openbittorrent.com:6969/announce",
+        "udp://tracker.internetwarriors.net:1337/announce",
+        "udp://exodus.desync.com:6969/announce",
+        "udp://tracker.cyberia.is:6969/announce",
+        "udp://open.stealth.si:80/announce",
+        "udp://tracker.tiny-vps.com:6969/announce",
+        "udp://tracker.moeking.me:6969/announce",
+        "udp://opentracker.i2p.rocks:6969/announce",
+        "udp://tracker.torrent.eu.org:451/announce",
+        "udp://tracker.dler.org:6969/announce",
+        "udp://open.demonii.com:1337/announce",
+        "http://tracker.openbittorrent.com:80/announce",
+        "http://tracker.opentrackr.org:1337/announce",
+        "http://tracker.internetwarriors.net:1337/announce",
+    }
+}
+
 func main() {
 	debug := flag.Bool("debug", false, "Enable debug logging")
 	flag.Parse()
@@ -89,16 +109,11 @@ func main() {
 		}
 	}
 
-	// Add fallback trackers
-	fallbackTrackers := []string{
-		"udp://tracker.opentrackr.org:1337/announce",
-		"udp://tracker.openbittorrent.com:6969/announce",
-		"udp://tracker.internetwarriors.net:1337/announce",
-	}
-	for _, fallbackTracker := range fallbackTrackers {
-		fallbackURL, err := tracker.NewTracker(fallbackTracker, peerID, infoHash)
+	// Add known Ubuntu trackers
+	for _, trackerURL := range getUbuntuTrackers() {
+		t, err := tracker.NewTracker(trackerURL, peerID, infoHash)
 		if err == nil {
-			multiTracker.AddTracker(fallbackURL)
+			multiTracker.AddTracker(t)
 		}
 	}
 
